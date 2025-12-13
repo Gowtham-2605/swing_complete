@@ -1,11 +1,13 @@
 # app.py
 """
-Enhanced Stock Scanner – Version 4.5 (Advanced ML-Powered)
-- Modern glassmorphic UI with advanced filtering
-- Enhanced ML model with 30+ features for 75-90% accuracy
-- Real-time statistics and filtering
-- Multi-timeframe analysis with volume profile
-- Advanced pattern recognition and momentum indicators
+Enhanced Stock Scanner – Version 5.1 (Multi-Timeframe Rule-Based)
+- Fixed yfinance data fetching issues
+- Proper intraday data handling
+- Multi-timeframe confirmation (HTF/MTF/LTF)
+- Lightweight candle pattern recognition
+- Score-based trade readiness
+- Professional risk management
+- Modern glassmorphic UI
 """
 
 from flask import Flask, request, jsonify, render_template_string
@@ -23,18 +25,6 @@ from functools import lru_cache
 import hashlib
 import math
 
-# ML imports - optional
-try:
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import classification_report, accuracy_score
-    from sklearn.preprocessing import StandardScaler
-    import joblib
-    SKLEARN_AVAILABLE = True
-except Exception as e:
-    logger.warning(f"scikit-learn not available: {e}")
-    SKLEARN_AVAILABLE = False
-
 # -------------------------------------------------
 # Flask setup
 # -------------------------------------------------
@@ -44,72 +34,51 @@ CORS(app)
 # -------------------------------------------------
 # Configuration
 # -------------------------------------------------
+# Use symbols without .NS suffix
 NIFTY_50 = [
-    "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY",
-    "AXISBANK", "WIPRO", "SBIN", "ITC", "LT",
-    "MARUTI", "ASIANPAINT", "KOTAKBANK", "SUNPHARMA", "DRREDDY",
-    "BRITANNIA", "HINDALCO", "ULTRACEMCO", "NTPC", "POWERGRID",
-    "GRASIM", "TECHM", "JSWSTEEL", "TATASTEEL", "EICHERMOT",
-    "HEROMOTOCO", "ADANIENT", "ADANIGREEN", "TITAN", "BAJAJFINSV",
-    "BAJAJ-AUTO", "BOSCHIND", "NESTLEIND", "APOLLOHOSP", "M&M",
-    "TATACONSUM", "ONGC", "SAIL", "HINDUNILVR", "HINDPETRO",
-    "BEL", "INDUSTOWER", "SHRIRAMFIN", "KPITTECH", "PEL",
-    "BALRAMCHIN", "VIPIND"
+    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
+    "AXISBANK.NS", "WIPRO.NS", "SBIN.NS", "ITC.NS", "LT.NS",
+    "MARUTI.NS", "ASIANPAINT.NS", "KOTAKBANK.NS", "SUNPHARMA.NS", "DRREDDY.NS",
+    "BRITANNIA.NS", "HINDALCO.NS", "ULTRACEMCO.NS", "NTPC.NS", "POWERGRID.NS",
+    "GRASIM.NS", "TECHM.NS", "JSWSTEEL.NS", "TATASTEEL.NS", "EICHERMOT.NS",
+    "HEROMOTOCO.NS", "ADANIENT.NS", "ADANIGREEN.NS", "TITAN.NS", "BAJAJFINSV.NS",
+    "BAJAJ-AUTO.NS", "BOSCHLTD.NS", "NESTLEIND.NS", "APOLLOHOSP.NS", "M&M.NS",
+    "TATACONSUM.NS", "ONGC.NS", "SAIL.NS", "HINDUNILVR.NS", "HINDPETRO.NS",
+    "BEL.NS", "INDUSTOWER.NS", "SHRIRAMFIN.NS", "KPITTECH.NS", "PIDILITIND.NS",
+    "COALINDIA.NS", "HCLTECH.NS"
 ]
 
 CACHE_EXPIRY = 300
-MAX_WORKERS = 10
-RATE_LIMIT_DELAY = 0.05
-MODEL_PATH = "v4_enhanced_model.joblib"
-SCALER_PATH = "v4_scaler.joblib"
+MAX_WORKERS = 8  # Reduced to avoid rate limiting
+RATE_LIMIT_DELAY = 0.1  # Increased delay
 
-# Enhanced feature set for better accuracy
-MODEL_FEATURES = [
-    "rsi", "rsi_divergence", "ema9", "ema21", "ema50", "ma100", "ma200",
-    "atr", "atr_ratio", "adx", "plus_di", "minus_di",
-    "macd", "macd_signal", "macd_hist",
-    "bb_upper", "bb_lower", "bb_width", "bb_position",
-    "vwap", "vol_ratio", "vol_trend", "vol_surge",
-    "price_change", "price_momentum", "trend_strength", "trend_consistency",
-    "support_distance", "resistance_distance",
-    "body_ratio", "wick_ratio", "candle_direction"
-]
+# Timeframe hierarchy with adjusted periods for yfinance limitations
+HTF_INTERVAL = "60m"    # 1-hour for trend permission
+MTF_INTERVAL = "15m"    # 15-min for structure
+LTF_INTERVAL = "5m"     # 5-min for entry timing
 
-MODEL_MIN_ROWS = 300
+# Adjusted periods for yfinance intraday data limitations
+# yfinance only provides intraday data for last 60 days
+HTF_PERIOD = "30d"      # 30 days for 1H data
+MTF_PERIOD = "15d"      # 15 days for 15M data  
+LTF_PERIOD = "7d"       # 7 days for 5M data
+MAIN_PERIOD = "15d"     # Main analysis period
+
+# Global state for stats
 SCAN_CACHE = {"data": None, "timestamp": None}
 CURRENT_METHOD = "ATR"
-CURRENT_TIMEFRAME = "60m"
+CURRENT_TIMEFRAME = "15m"
 
 # -------------------------------------------------
 # Cache System
 # -------------------------------------------------
-try:
-    import redis
-    REDIS_AVAILABLE = True
-    redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-    redis_client.ping()
-    logger.info("Redis connected successfully")
-except Exception:
-    REDIS_AVAILABLE = False
-
 class SmartCache:
     def __init__(self):
         self.memory_cache = {}
-        self.use_redis = REDIS_AVAILABLE
         self.hits = 0
         self.misses = 0
 
     def get(self, key):
-        if self.use_redis:
-            try:
-                data = redis_client.get(key)
-                if data:
-                    self.hits += 1
-                    return json.loads(data)
-                self.misses += 1
-                return None
-            except Exception:
-                pass
         cached = self.memory_cache.get(key)
         if cached and cached['expiry'] > time.time():
             self.hits += 1
@@ -118,12 +87,6 @@ class SmartCache:
         return None
 
     def set(self, key, value, expiry=CACHE_EXPIRY):
-        if self.use_redis:
-            try:
-                redis_client.setex(key, expiry, json.dumps(value, default=str))
-                return
-            except Exception:
-                pass
         self.memory_cache[key] = {'data': value, 'expiry': time.time() + expiry}
 
     def get_stats(self):
@@ -134,13 +97,19 @@ class SmartCache:
 cache = SmartCache()
 
 # -------------------------------------------------
-# Data Fetching
+# Data Fetching with yfinance error handling
 # -------------------------------------------------
 def get_cache_key(symbol, interval, period):
     time_bucket = datetime.now().strftime('%Y%m%d%H') + str(datetime.now().minute // 5)
     return f"stock:{symbol}:{interval}:{period}:{time_bucket}"
 
-def fetch_stock_data(symbol: str, interval: str = "60m", period: str = "1mo"):
+def fetch_stock_data(symbol: str, interval: str = "60m", period: str = "15d"):
+    """
+    Fetch stock data with yfinance error handling
+    Note: yfinance has limitations:
+    - Intraday data only available for last 60 days
+    - Different intervals have different max periods
+    """
     cache_key = get_cache_key(symbol, interval, period)
     cached_data = cache.get(cache_key)
     if cached_data:
@@ -151,19 +120,50 @@ def fetch_stock_data(symbol: str, interval: str = "60m", period: str = "1mo"):
     
     try:
         time.sleep(RATE_LIMIT_DELAY)
-        yf_symbol = symbol + ".NS"
-        ticker = yf.Ticker(yf_symbol)
+        
+        # Adjust period based on interval for yfinance limitations
+        if interval in ["5m", "15m", "30m"]:
+            # For intraday intervals, limit to 60 days max
+            if period in ["3mo", "60d"]:
+                period = "60d"
+            elif period in ["1mo", "30d"]:
+                period = "30d"
+            elif period in ["2wk", "15d"]:
+                period = "15d"
+            elif period in ["1wk", "7d"]:
+                period = "7d"
+        
+        ticker = yf.Ticker(symbol)
         df = ticker.history(period=period, interval=interval)
+        
         if df.empty:
+            # Try with shorter period if data not available
+            if period != "7d":
+                return fetch_stock_data(symbol, interval, "7d")
             return None
+            
+        if len(df) < 10:  # Need minimum data
+            return None
+            
         df.reset_index(inplace=True)
         date_col = "Datetime" if "Datetime" in df.columns else "Date"
         df = df[[date_col, "Open", "High", "Low", "Close", "Volume"]]
         df.columns = ["date", "open", "high", "low", "close", "volume"]
+        
+        # Ensure numeric columns
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        df = df.dropna()
+        
+        if df.empty:
+            return None
+            
         cache.set(cache_key, df.to_dict('records'), CACHE_EXPIRY)
         return df
+        
     except Exception as e:
-        logger.error(f"Error fetching {symbol}: {e}")
+        logger.debug(f"Error fetching {symbol} ({interval}/{period}): {e}")
         return None
 
 def get_live_price(symbol: str) -> float:
@@ -172,624 +172,524 @@ def get_live_price(symbol: str) -> float:
     if cached:
         return cached
     try:
-        yf_symbol = symbol + ".NS"
-        ticker = yf.Ticker(yf_symbol)
+        ticker = yf.Ticker(symbol)
         data = ticker.history(period="1d", interval="1m")
         if not data.empty:
             ltp = float(data["Close"].iloc[-1])
             cache.set(cache_key, ltp, 60)
             return ltp
+    except Exception as e:
+        logger.debug(f"Live price error for {symbol}: {e}")
+    
+    # Fallback: get last close from daily data
+    try:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="5d", interval="1d")
+        if not data.empty:
+            return float(data["Close"].iloc[-1])
     except Exception:
         pass
+        
     return None
 
 # -------------------------------------------------
-# Enhanced Technical Indicators
+# Technical Indicators
 # -------------------------------------------------
-def calculate_rsi(prices, period=14):
-    try:
-        prices = np.array(prices, dtype=float)
-        if len(prices) < period + 1:
-            return 50.0
-        deltas = np.diff(prices)
-        seed = deltas[:period]
-        up = seed[seed > 0].sum() / period
-        down = -seed[seed < 0].sum() / period if np.any(seed < 0) else 0
-        rs = up / down if down != 0 else np.inf
-        rsi = np.zeros_like(prices)
-        rsi[:period] = 100.0 - (100.0 / (1.0 + rs))
-        up_vals = np.where(deltas > 0, deltas, 0)
-        down_vals = np.where(deltas < 0, -deltas, 0)
-        for i in range(period, len(prices) - 1):
-            up = (up * (period - 1) + up_vals[i]) / period
-            down = (down * (period - 1) + down_vals[i]) / period
-            rs = up / down if down != 0 else np.inf
-            rsi[i + 1] = 100.0 - (100.0 / (1.0 + rs))
-        return float(rsi[-1])
-    except Exception:
-        return 50.0
-
 def calculate_ema(series: pd.Series, length: int) -> float:
     if len(series) < length:
         return float(series.iloc[-1])
-    return float(series.ewm(span=length, adjust=False).mean().iloc[-1])
-
-def calculate_macd(close_series):
     try:
-        ema12 = close_series.ewm(span=12, adjust=False).mean()
-        ema26 = close_series.ewm(span=26, adjust=False).mean()
-        macd = ema12 - ema26
-        signal = macd.ewm(span=9, adjust=False).mean()
-        hist = macd - signal
-        return float(macd.iloc[-1]), float(signal.iloc[-1]), float(hist.iloc[-1])
+        return float(series.ewm(span=length, adjust=False).mean().iloc[-1])
     except Exception:
-        return 0.0, 0.0, 0.0
+        return float(series.iloc[-1])
 
-def calculate_bollinger_bands(close_series, period=20):
+def calculate_rsi(prices, period=14):
     try:
-        sma = close_series.rolling(window=period).mean()
-        std = close_series.rolling(window=period).std()
-        upper = sma + (std * 2)
-        lower = sma - (std * 2)
-        current_price = float(close_series.iloc[-1])
-        bb_upper = float(upper.iloc[-1])
-        bb_lower = float(lower.iloc[-1])
-        bb_width = (bb_upper - bb_lower) / current_price if current_price > 0 else 0
-        bb_position = (current_price - bb_lower) / (bb_upper - bb_lower) if bb_upper > bb_lower else 0.5
-        return bb_upper, bb_lower, bb_width, bb_position
+        if len(prices) < period + 1:
+            return 50.0
+            
+        prices = np.array(prices, dtype=float)
+        deltas = np.diff(prices)
+        
+        # Initial calculation
+        gain = np.where(deltas > 0, deltas, 0)
+        loss = np.where(deltas < 0, -deltas, 0)
+        
+        avg_gain = np.mean(gain[:period])
+        avg_loss = np.mean(loss[:period])
+        
+        if avg_loss == 0:
+            return 100.0
+            
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        # Smoothing
+        for i in range(period, len(prices)-1):
+            avg_gain = (avg_gain * (period-1) + gain[i]) / period
+            avg_loss = (avg_loss * (period-1) + loss[i]) / period
+            
+            if avg_loss == 0:
+                rsi = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+                
+        return float(rsi)
     except Exception:
-        return 0.0, 0.0, 0.0, 0.5
+        return 50.0
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     try:
+        if len(df) < period + 1:
+            return 0.0
+            
         high = df["high"]
         low = df["low"]
         close = df["close"]
-        prev_close = close.shift(1)
+        
         tr1 = high - low
-        tr2 = (high - prev_close).abs()
-        tr3 = (low - prev_close).abs()
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
-        return float(atr.iloc[-1]) if not atr.dropna().empty else 0.0
+        
+        return float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else 0.0
     except Exception:
         return 0.0
 
 def calculate_adx(df: pd.DataFrame, period: int = 14):
     try:
+        if len(df) < period * 2:
+            return 20.0, 20.0, 20.0
+            
         high = df["high"]
         low = df["low"]
         close = df["close"]
-        plus_dm = high.diff()
-        minus_dm = low.diff().abs()
-        plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
-        minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
+        
+        # Calculate +DM and -DM
+        up_move = high.diff()
+        down_move = low.diff().abs() * -1
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Calculate True Range
         tr1 = high - low
         tr2 = (high - close.shift(1)).abs()
         tr3 = (low - close.shift(1)).abs()
         tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        tr_smooth = pd.Series(tr).rolling(window=period).sum()
-        plus_di = 100 * (pd.Series(plus_dm).rolling(window=period).sum() / tr_smooth)
-        minus_di = 100 * (pd.Series(minus_dm).rolling(window=period).sum() / tr_smooth)
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+        
+        # Smooth the values
+        def smooth(series, period):
+            return series.rolling(window=period).sum()
+        
+        atr = smooth(tr, period)
+        plus_di = 100 * smooth(pd.Series(plus_dm), period) / atr
+        minus_di = 100 * smooth(pd.Series(minus_dm), period) / atr
+        
+        # Calculate DX and ADX
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).abs()
         adx = dx.rolling(window=period).mean()
-        if adx.dropna().empty:
+        
+        last_idx = -1
+        while pd.isna(adx.iloc[last_idx]) and abs(last_idx) < len(adx):
+            last_idx -= 1
+            
+        if pd.isna(adx.iloc[last_idx]):
             return 20.0, 20.0, 20.0
-        return float(adx.dropna().iloc[-1]), float(plus_di.dropna().iloc[-1]), float(minus_di.dropna().iloc[-1])
+            
+        return (
+            float(adx.iloc[last_idx]),
+            float(plus_di.iloc[last_idx]) if not pd.isna(plus_di.iloc[last_idx]) else 20.0,
+            float(minus_di.iloc[last_idx]) if not pd.isna(minus_di.iloc[last_idx]) else 20.0
+        )
     except Exception:
         return 20.0, 20.0, 20.0
 
 def calculate_vwap(df: pd.DataFrame) -> float:
     try:
+        if df.empty:
+            return 0.0
+            
         typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
         vwap = (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
-        return float(vwap.iloc[-1])
+        
+        last_valid = vwap.iloc[-1]
+        if pd.isna(last_valid):
+            # Find last non-NaN value
+            for i in range(2, len(vwap) + 1):
+                val = vwap.iloc[-i]
+                if not pd.isna(val):
+                    return float(val)
+            return float(df["close"].iloc[-1])
+            
+        return float(last_valid)
     except Exception:
         return 0.0
 
-def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0):
+def calculate_macd(close_series):
     try:
-        atr = calculate_atr(df, period)
-        if atr <= 0:
-            return 0.0, "neutral"
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-        hl2 = (high + low) / 2.0
-        last_hl2 = hl2.iloc[-1]
-        upper_band = last_hl2 + multiplier * atr
-        lower_band = last_hl2 - multiplier * atr
-        last_close = close.iloc[-1]
-        if last_close > upper_band:
-            return float(lower_band), "bullish"
-        elif last_close < lower_band:
-            return float(upper_band), "bearish"
-        else:
-            if last_close >= last_hl2:
-                return float(lower_band), "bullish"
-            else:
-                return float(upper_band), "bearish"
+        if len(close_series) < 26:
+            return 0.0, 0.0, 0.0
+            
+        ema12 = close_series.ewm(span=12, adjust=False).mean()
+        ema26 = close_series.ewm(span=26, adjust=False).mean()
+        macd = ema12 - ema26
+        signal = macd.ewm(span=9, adjust=False).mean()
+        hist = macd - signal
+        
+        return (
+            float(macd.iloc[-1]) if not pd.isna(macd.iloc[-1]) else 0.0,
+            float(signal.iloc[-1]) if not pd.isna(signal.iloc[-1]) else 0.0,
+            float(hist.iloc[-1]) if not pd.isna(hist.iloc[-1]) else 0.0
+        )
     except Exception:
-        return 0.0, "neutral"
-
-def get_daily_pivot(symbol: str):
-    cache_key = f"pivot:{symbol}:{datetime.now().strftime('%Y%m%d')}"
-    cached = cache.get(cache_key)
-    if cached:
-        return cached['pivot'], cached['r1'], cached['s1']
-    try:
-        yf_symbol = symbol + ".NS"
-        ticker = yf.Ticker(yf_symbol)
-        df = ticker.history(period="5d", interval="1d")
-        if df.empty or len(df) < 2:
-            return None, None, None
-        prev = df.iloc[-2]
-        high = float(prev["High"])
-        low = float(prev["Low"])
-        close = float(prev["Close"])
-        pivot = (high + low + close) / 3.0
-        r1 = 2 * pivot - low
-        s1 = 2 * pivot - high
-        cache.set(cache_key, {'pivot': pivot, 'r1': r1, 's1': s1}, 86400)
-        return pivot, r1, s1
-    except Exception:
-        return None, None, None
+        return 0.0, 0.0, 0.0
 
 # -------------------------------------------------
-# Pattern Recognition
+# Candle Pattern Detection
 # -------------------------------------------------
 def detect_candle_pattern(df):
-    try:
-        if df is None or len(df) < 3:
-            return []
-        o = df['open'].iloc[-3:]
-        h = df['high'].iloc[-3:]
-        l = df['low'].iloc[-3:]
-        c = df['close'].iloc[-3:]
-        patterns = []
-        
-        # Bullish patterns
-        if c.iloc[-2] < o.iloc[-2] and c.iloc[-1] > o.iloc[-1] and c.iloc[-1] > o.iloc[-2]:
-            patterns.append("Bullish Engulfing")
-        
-        real_body = abs(c.iloc[-1] - o.iloc[-1])
-        candle_range = h.iloc[-1] - l.iloc[-1] if (h.iloc[-1] - l.iloc[-1])>0 else 1
-        if candle_range > 0 and real_body < 0.4 * candle_range:
-            lower_wick = min(o.iloc[-1], c.iloc[-1]) - l.iloc[-1]
-            if lower_wick > 2 * real_body:
-                patterns.append("Hammer")
-        
-        # Morning star
-        if len(c) >= 3:
-            if c.iloc[-3] < o.iloc[-3] and abs(c.iloc[-2] - o.iloc[-2]) < real_body * 0.3 and c.iloc[-1] > o.iloc[-1]:
-                patterns.append("Morning Star")
-        
-        # Bearish patterns
-        if c.iloc[-2] > o.iloc[-2] and c.iloc[-1] < o.iloc[-1] and c.iloc[-1] < o.iloc[-2]:
-            patterns.append("Bearish Engulfing")
-        
-        if candle_range > 0 and real_body < 0.4 * candle_range:
-            upper_wick = h.iloc[-1] - max(o.iloc[-1], c.iloc[-1])
-            if upper_wick > 2 * real_body:
-                patterns.append("Shooting Star")
-        
-        # Evening star
-        if len(c) >= 3:
-            if c.iloc[-3] > o.iloc[-3] and abs(c.iloc[-2] - o.iloc[-2]) < real_body * 0.3 and c.iloc[-1] < o.iloc[-1]:
-                patterns.append("Evening Star")
-        
+    """Lightweight candle pattern detection"""
+    patterns = []
+    if df is None or len(df) < 3:
         return patterns
-    except Exception:
-        return []
-
-def get_htf_trend(symbol):
+    
     try:
-        df = fetch_stock_data(symbol, interval="1d", period="60d")
-        if df is None or len(df) < 50:
-            return "neutral"
-        ema20 = calculate_ema(df["close"], 20)
-        ema50 = calculate_ema(df["close"], 50)
-        price = float(df["close"].iloc[-1])
+        # Get last 3 candles
+        o = df['open'].iloc[-3:].values
+        h = df['high'].iloc[-3:].values
+        l = df['low'].iloc[-3:].values
+        c = df['close'].iloc[-3:].values
         
-        if price > ema20 > ema50:
-            return "strong_bullish"
-        elif price > ema20:
-            return "bullish"
-        elif price < ema20 < ema50:
-            return "strong_bearish"
-        elif price < ema20:
-            return "bearish"
-        return "neutral"
-    except Exception:
-        return "neutral"
+        # Current candle data
+        o1, h1, l1, c1 = o[-1], h[-1], l[-1], c[-1]
+        o2, h2, l2, c2 = o[-2], h[-2], l[-2], c[-2]
+        
+        # Skip if any value is NaN
+        if any(np.isnan([o1, h1, l1, c1, o2, h2, l2, c2])):
+            return patterns
+        
+        # Body and range calculations
+        body1 = abs(c1 - o1)
+        range1 = h1 - l1 if h1 > l1 else 0.001
+        body2 = abs(c2 - o2)
+        range2 = h2 - l2 if h2 > l2 else 0.001
+        
+        # Bullish Engulfing
+        if c2 < o2 and c1 > o1 and c1 > o2 and o1 < c2:
+            patterns.append("BULLISH_ENGULFING")
+        
+        # Bearish Engulfing
+        if c2 > o2 and c1 < o1 and c1 < o2 and o1 > c2:
+            patterns.append("BEARISH_ENGULFING")
+        
+        # Hammer (bullish reversal)
+        if range1 > 0 and body1 < 0.4 * range1:
+            lower_wick = min(o1, c1) - l1
+            upper_wick = h1 - max(o1, c1)
+            if lower_wick > 2 * body1 and upper_wick < body1 * 0.5:
+                patterns.append("HAMMER")
+        
+        # Shooting Star (bearish reversal)
+        if range1 > 0 and body1 < 0.4 * range1:
+            upper_wick = h1 - max(o1, c1)
+            lower_wick = min(o1, c1) - l1
+            if upper_wick > 2 * body1 and lower_wick < body1 * 0.5:
+                patterns.append("SHOOTING_STAR")
+                
+    except Exception as e:
+        logger.debug(f"Candle pattern error: {e}")
+    
+    return patterns
 
 # -------------------------------------------------
-# Enhanced Feature Engineering
+# Multi-Timeframe Analysis
 # -------------------------------------------------
-def build_enhanced_features(df):
+def analyze_htf(symbol: str):
+    """High Timeframe (1H) analysis for trend permission"""
+    df = fetch_stock_data(symbol, interval=HTF_INTERVAL, period=HTF_PERIOD)
+    if df is None or len(df) < 20:
+        return "NEUTRAL", 0, 0, 0, 0
+    
+    close = df["close"]
+    
+    # Calculate indicators
+    ema20 = calculate_ema(close, 20)
+    ema50 = calculate_ema(close, 50)
+    vwap = calculate_vwap(df)
+    adx, plus_di, minus_di = calculate_adx(df, 14)
+    price = float(close.iloc[-1])
+    
+    # Trend logic
+    bias = "NEUTRAL"
+    score = 0
+    
+    # Bullish conditions
+    bullish_conditions = 0
+    if price > ema20 and ema20 > ema50:
+        bullish_conditions += 1
+    if price > vwap:
+        bullish_conditions += 1
+    if adx >= 20 and plus_di > minus_di:
+        bullish_conditions += 1
+    
+    # Bearish conditions
+    bearish_conditions = 0
+    if price < ema20 and ema20 < ema50:
+        bearish_conditions += 1
+    if price < vwap:
+        bearish_conditions += 1
+    if adx >= 20 and minus_di > plus_di:
+        bearish_conditions += 1
+    
+    # Determine bias
+    if bullish_conditions >= 2:
+        bias = "BULLISH"
+        score = bullish_conditions * 10
+    elif bearish_conditions >= 2:
+        bias = "BEARISH"
+        score = bearish_conditions * 10
+    
+    return bias, score, ema20, ema50, adx
+
+def analyze_mtf(symbol: str):
+    """Medium Timeframe (15m) analysis for structure confirmation"""
+    df = fetch_stock_data(symbol, interval=MTF_INTERVAL, period=MTF_PERIOD)
+    if df is None or len(df) < 15:
+        return "NEUTRAL", 0, 0, 0
+    
+    close = df["close"]
+    vwap = calculate_vwap(df)
+    
+    ema9 = calculate_ema(close, 9)
+    ema21 = calculate_ema(close, 21)
+    price = float(close.iloc[-1])
+    
+    # Structure logic
+    structure = "NEUTRAL"
+    score = 0
+    
+    if ema9 > ema21 and price > vwap:
+        structure = "BULLISH"
+        score = 20
+    elif ema9 < ema21 and price < vwap:
+        structure = "BEARISH"
+        score = 20
+    
+    return structure, score, ema9, ema21
+
+def analyze_ltf(symbol: str):
+    """Low Timeframe (5m) analysis for entry timing"""
+    df = fetch_stock_data(symbol, interval=LTF_INTERVAL, period=LTF_PERIOD)
+    if df is None or len(df) < 10:
+        return "NEUTRAL", 0
+    
+    close = df["close"]
+    
+    ema9 = calculate_ema(close, 9)
+    ema21 = calculate_ema(close, 21)
+    price = float(close.iloc[-1])
+    
+    # Entry logic (only timing, not direction)
+    entry_state = "NEUTRAL"
+    if ema9 > ema21:
+        entry_state = "BULLISH_CROSS"
+    elif ema9 < ema21:
+        entry_state = "BEARISH_CROSS"
+    
+    # Entry score based on recent crossover
+    score = 0
+    if len(close) >= 3:
+        ema9_prev = calculate_ema(close.iloc[:-1], 9)
+        ema21_prev = calculate_ema(close.iloc[:-1], 21)
+        
+        # Fresh crossover detection
+        if (ema9 > ema21 and ema9_prev <= ema21_prev):
+            score = 15  # Fresh bullish crossover
+        elif (ema9 < ema21 and ema9_prev >= ema21_prev):
+            score = 15  # Fresh bearish crossover
+        elif entry_state != "NEUTRAL":
+            score = 8   # Existing trend
+    
+    return entry_state, score
+
+# -------------------------------------------------
+# Score-Based Trade Readiness
+# -------------------------------------------------
+def calculate_trade_score(htf_bias, htf_score, mtf_structure, mtf_score, 
+                         ltf_entry, ltf_score, candle_patterns, atr_ratio, 
+                         rr_ratio, signal, rsi, adx):
+    """Calculate confidence score (0-100) based on multiple factors"""
+    score = 0
+    
+    # 1. HTF Alignment (MOST IMPORTANT) - +25
+    if htf_bias == "BULLISH" and signal == "BUY":
+        score += 25
+    elif htf_bias == "BEARISH" and signal == "SELL":
+        score += 25
+    elif htf_bias == "NEUTRAL":
+        score -= 30  # Hard penalty for neutral HTF
+    
+    # 2. MTF Structure Alignment - +20
+    if mtf_structure == "BULLISH" and signal == "BUY":
+        score += 20
+    elif mtf_structure == "BEARISH" and signal == "SELL":
+        score += 20
+    
+    # 3. LTF Entry Timing - +15
+    if ltf_entry == "BULLISH_CROSS" and signal == "BUY":
+        score += 15
+    elif ltf_entry == "BEARISH_CROSS" and signal == "SELL":
+        score += 15
+    
+    # 4. Candle Pattern Confirmation - +10 / -10
+    if signal == "BUY":
+        bullish_patterns = ["BULLISH_ENGULFING", "HAMMER"]
+        bearish_patterns = ["BEARISH_ENGULFING", "SHOOTING_STAR"]
+        
+        for pattern in candle_patterns:
+            if pattern in bullish_patterns:
+                score += 10
+            elif pattern in bearish_patterns:
+                score -= 10
+    elif signal == "SELL":
+        bearish_patterns = ["BEARISH_ENGULFING", "SHOOTING_STAR"]
+        bullish_patterns = ["BULLISH_ENGULFING", "HAMMER"]
+        
+        for pattern in candle_patterns:
+            if pattern in bearish_patterns:
+                score += 10
+            elif pattern in bullish_patterns:
+                score -= 10
+    
+    # 5. ADX Strength - +10
+    if adx >= 25:
+        score += 10
+    elif adx >= 20:
+        score += 5
+    
+    # 6. RSI confirmation
+    if signal == "BUY" and rsi > 50:
+        score += 5
+    elif signal == "SELL" and rsi < 50:
+        score += 5
+    
+    # 7. Risk:Reward Ratio - +10
+    if rr_ratio >= 2.0:
+        score += 10
+    elif rr_ratio >= 1.5:
+        score += 5
+    
+    # 8. Volatility Filter - penalty for low volatility
+    if atr_ratio < 0.003:  # ATR/Price < 0.3%
+        score -= 20
+    
+    # Ensure score is within bounds
+    score = max(0, min(100, score))
+    
+    return int(round(score))
+
+# -------------------------------------------------
+# Rule-Based Signal Generation
+# -------------------------------------------------
+def generate_signal(htf_bias, mtf_structure):
+    """Generate BUY/SELL/NEUTRAL signal based on timeframe alignment"""
+    
+    # Rule 1: HTF must provide trend permission
+    if htf_bias == "NEUTRAL":
+        return "NEUTRAL"
+    
+    # Rule 2: MTF must align with HTF
+    if htf_bias == "BULLISH" and mtf_structure != "BULLISH":
+        return "NEUTRAL"
+    if htf_bias == "BEARISH" and mtf_structure != "BEARISH":
+        return "NEUTRAL"
+    
+    # Determine final signal
+    if htf_bias == "BULLISH" and mtf_structure == "BULLISH":
+        return "BUY"
+    elif htf_bias == "BEARISH" and mtf_structure == "BEARISH":
+        return "SELL"
+    
+    return "NEUTRAL"
+
+# -------------------------------------------------
+# Main Scanner Function
+# -------------------------------------------------
+def scan_symbol(symbol: str, method: str = "ATR"):
+    """Scan a single symbol with multi-timeframe confirmation"""
     try:
-        if df is None or len(df) < 50:
+        # Fetch data for primary analysis (using MTF for main calculations)
+        df = fetch_stock_data(symbol, interval=MTF_INTERVAL, period=MAIN_PERIOD)
+        if df is None or len(df) < 20:
             return None
         
-        features = {}
         close = df["close"]
         high = df["high"]
         low = df["low"]
         volume = df["volume"]
         
-        # Price & Momentum
-        features['rsi'] = calculate_rsi(close.values, 14)
-        rsi_prev = calculate_rsi(close.iloc[:-5].values, 14) if len(close) > 20 else features['rsi']
-        features['rsi_divergence'] = features['rsi'] - rsi_prev
+        # Get live price
+        ltp = get_live_price(symbol)
+        if ltp is None or ltp <= 0:
+            ltp = float(close.iloc[-1])
         
-        features['ema9'] = calculate_ema(close, 9)
-        features['ema21'] = calculate_ema(close, 21)
-        features['ema50'] = calculate_ema(close, 50)
-        features['ma100'] = calculate_ema(close, 100)
-        features['ma200'] = calculate_ema(close, 200)
-        
-        # Volatility
-        features['atr'] = calculate_atr(df, 14)
-        last_close = float(close.iloc[-1])
-        features['atr_ratio'] = features['atr'] / last_close if last_close > 0 else 0
-        
-        # Trend Strength
+        # Calculate indicators on MTF
+        rsi = calculate_rsi(close.values, 14)
+        atr = calculate_atr(df, 14)
         adx, plus_di, minus_di = calculate_adx(df, 14)
-        features['adx'] = adx
-        features['plus_di'] = plus_di
-        features['minus_di'] = minus_di
-        
-        # MACD
+        vwap = calculate_vwap(df)
         macd, macd_signal, macd_hist = calculate_macd(close)
-        features['macd'] = macd
-        features['macd_signal'] = macd_signal
-        features['macd_hist'] = macd_hist
         
-        # Bollinger Bands
-        bb_upper, bb_lower, bb_width, bb_position = calculate_bollinger_bands(close)
-        features['bb_upper'] = bb_upper
-        features['bb_lower'] = bb_lower
-        features['bb_width'] = bb_width
-        features['bb_position'] = bb_position
+        # Calculate EMA values
+        ema9 = calculate_ema(close, 9)
+        ema21 = calculate_ema(close, 21)
+        ema100 = calculate_ema(close, 100) if len(close) >= 100 else ema21
         
-        # Volume Analysis
-        features['vwap'] = calculate_vwap(df)
-        last_vol = float(volume.iloc[-1])
-        avg_vol = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else last_vol
-        features['vol_ratio'] = last_vol / avg_vol if avg_vol > 0 else 1.0
+        # Multi-Timeframe Analysis
+        htf_bias, htf_score, htf_ema20, htf_ema50, htf_adx = analyze_htf(symbol)
+        mtf_structure, mtf_score, mtf_ema9, mtf_ema21 = analyze_mtf(symbol)
+        ltf_entry, ltf_score = analyze_ltf(symbol)
         
-        vol_ma5 = volume.rolling(5).mean().iloc[-1]
-        vol_ma20 = volume.rolling(20).mean().iloc[-1]
-        features['vol_trend'] = vol_ma5 / vol_ma20 if vol_ma20 > 0 else 1.0
-        features['vol_surge'] = 1.0 if features['vol_ratio'] > 2.0 else 0.0
+        # Candle Pattern Detection
+        candle_patterns = detect_candle_pattern(df)
         
-        # Price Action
-        prev_close = float(close.iloc[-2]) if len(close) >= 2 else last_close
-        features['price_change'] = (last_close - prev_close) / prev_close if prev_close > 0 else 0.0
+        # Generate signal based on timeframe alignment
+        signal = generate_signal(htf_bias, mtf_structure)
         
-        close_5d = float(close.iloc[-6]) if len(close) >= 6 else last_close
-        features['price_momentum'] = (last_close - close_5d) / close_5d if close_5d > 0 else 0.0
+        # Risk Management Calculations
+        atr_ratio = atr / ltp if ltp > 0 else 0
         
-        features['trend_strength'] = abs(features['ema9'] - features['ema21']) / last_close if last_close > 0 else 0.0
-        
-        # Trend consistency (EMA alignment)
-        trend_align = 0
-        if features['ema9'] > features['ema21'] > features['ema50']:
-            trend_align = 1.0
-        elif features['ema9'] < features['ema21'] < features['ema50']:
-            trend_align = -1.0
-        features['trend_consistency'] = trend_align
-        
-        # Support/Resistance
-        recent_low = float(low.iloc[-20:].min()) if len(low) >= 20 else float(low.min())
-        recent_high = float(high.iloc[-20:].max()) if len(high) >= 20 else float(high.max())
-        features['support_distance'] = (last_close - recent_low) / last_close if last_close > 0 else 0
-        features['resistance_distance'] = (recent_high - last_close) / last_close if last_close > 0 else 0
-        
-        # Candle characteristics
-        last_open = float(df['open'].iloc[-1])
-        last_high = float(df['high'].iloc[-1])
-        last_low = float(df['low'].iloc[-1])
-        candle_range = last_high - last_low
-        body = abs(last_close - last_open)
-        features['body_ratio'] = body / candle_range if candle_range > 0 else 0.5
-        features['wick_ratio'] = (candle_range - body) / candle_range if candle_range > 0 else 0.5
-        features['candle_direction'] = 1.0 if last_close > last_open else -1.0
-        
-        return features
-    except Exception as e:
-        logger.error(f"Feature engineering error: {e}")
-        return None
-
-# -------------------------------------------------
-# ML Model Training
-# -------------------------------------------------
-def label_trades(df, forward=5, threshold=0.008):
-    close = df['close'].values
-    labels = []
-    n = len(close)
-    for i in range(n):
-        j = min(i + forward, n - 1)
-        if j == i:
-            labels.append(0)
-        else:
-            ret = (close[j] - close[i]) / close[i]
-            if ret > threshold:
-                labels.append(1)  # BUY
-            elif ret < -threshold:
-                labels.append(2)  # SELL
-            else:
-                labels.append(0)  # NEUTRAL
-    return labels
-
-def prepare_training_data(symbols=None, interval="60m", months=6):
-    symbols = symbols or NIFTY_50
-    rows = []
-    logger.info(f"Preparing training data for {len(symbols)} symbols...")
-    
-    for idx, sym in enumerate(symbols):
-        try:
-            if idx % 10 == 0:
-                logger.info(f"Processing {idx}/{len(symbols)}: {sym}")
-            
-            df = fetch_stock_data(sym, interval=interval, period=f"{int(months*30)}d")
-            if df is None or len(df) < MODEL_MIN_ROWS:
-                continue
-            
-            df = df.reset_index(drop=True)
-            labels = label_trades(df, forward=5, threshold=0.008)
-            df['label'] = labels
-            
-            for i in range(50, len(df) - 5):
-                window = df.iloc[:i+1].copy()
-                feat = build_enhanced_features(window)
-                if not feat:
-                    continue
-                
-                lab = int(df['label'].iloc[i])
-                feat['label'] = lab
-                rows.append(feat)
-                
-        except Exception as e:
-            logger.error(f"Training data error for {sym}: {e}")
-    
-    if not rows:
-        return None
-    
-    tdf = pd.DataFrame(rows)
-    tdf = tdf.dropna()
-    logger.info(f"Generated {len(tdf)} training samples")
-    return tdf
-
-def train_enhanced_model(force=False):
-    if not SKLEARN_AVAILABLE:
-        return False, "scikit-learn not available"
-    
-    if os.path.exists(MODEL_PATH) and not force:
-        try:
-            model_data = joblib.load(MODEL_PATH)
-            return True, "Model loaded from disk"
-        except Exception:
-            pass
-    
-    logger.info("Starting model training...")
-    tdf = prepare_training_data(months=6)
-    
-    if tdf is None or len(tdf) < 500:
-        return False, f"Insufficient data: {0 if tdf is None else len(tdf)} samples"
-    
-    X = tdf[MODEL_FEATURES].values
-    y = tdf['label'].values
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_scaled, y, test_size=0.2, random_state=42, stratify=y
-    )
-    
-    # Use Gradient Boosting for better accuracy
-    model = GradientBoostingClassifier(
-        n_estimators=200,
-        learning_rate=0.1,
-        max_depth=5,
-        random_state=42,
-        subsample=0.8
-    )
-    
-    logger.info(f"Training on {len(X_train)} samples...")
-    model.fit(X_train, y_train)
-    
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    report = classification_report(y_test, y_pred, output_dict=True)
-    
-    logger.info(f"Model accuracy: {accuracy:.2%}")
-    
-    # Save model and scaler
-    joblib.dump({
-        'model': model,
-        'scaler': scaler,
-        'report': report,
-        'accuracy': accuracy,
-        'features': MODEL_FEATURES
-    }, MODEL_PATH)
-    
-    return True, f"Model trained: {accuracy:.2%} accuracy on {len(X_test)} test samples"
-
-def load_model():
-    if not SKLEARN_AVAILABLE:
-        return None, None
-    try:
-        if os.path.exists(MODEL_PATH):
-            data = joblib.load(MODEL_PATH)
-            return data.get('model'), data.get('scaler')
-    except Exception as e:
-        logger.error(f"Model load error: {e}")
-    return None, None
-
-MODEL, SCALER = None, None
-if SKLEARN_AVAILABLE:
-    MODEL, SCALER = load_model()
-
-# -------------------------------------------------
-# Scanner with Enhanced ML
-# -------------------------------------------------
-def scan_symbol(symbol: str, method: str = "ATR", timeframe: str = "60m"):
-    try:
-        df = fetch_stock_data(symbol, interval=timeframe, period="3mo")
-        if df is None or len(df) < 50:
-            return None
-        
-        # Extract features
-        features = build_enhanced_features(df)
-        if not features:
-            return None
-        
-        close = df["close"]
-        last_close = float(close.iloc[-1])
-        
-        # Get indicators
-        rsi = features['rsi']
-        atr = features['atr']
-        adx = features['adx']
-        vwap = features['vwap']
-        st_value, st_dir = calculate_supertrend(df, 10, 3.0)
-        
-        patterns = detect_candle_pattern(df)
-        htf_trend = get_htf_trend(symbol)
-        
-        pivot, r1, s1 = get_daily_pivot(symbol)
-        if pivot is None:
-            pivot = (float(df['high'].iloc[-1]) + float(df['low'].iloc[-1]) + last_close) / 3.0
-        
-        # Rule-based signal
-        signal = "NEUTRAL"
-        batches = []
-        
-        # Trend batch
-        if features['ema9'] > features['ema21'] > features['ema50']:
-            batches.append("Strong Uptrend")
-            signal = "BUY"
-        elif features['ema9'] < features['ema21'] < features['ema50']:
-            batches.append("Strong Downtrend")
-            signal = "SELL"
-        
-        # Momentum batch
-        if rsi > 60 and features['macd_hist'] > 0:
-            batches.append("Bullish Momentum")
-        elif rsi < 40 and features['macd_hist'] < 0:
-            batches.append("Bearish Momentum")
-        
-        # Volume batch
-        if features['vol_ratio'] > 1.5 and last_close > vwap:
-            batches.append("Volume Surge + Above VWAP")
-        
-        # Structure batch
-        if st_dir == "bullish" and adx > 22:
-            batches.append("Bullish Structure")
-        elif st_dir == "bearish" and adx > 22:
-            batches.append("Bearish Structure")
-        
-        batch_count = len(batches)
-        
-        # ML Prediction
-        model_conf = None
-        ml_signal = "NEUTRAL"
-        ml_probability = 50.0
-        
-        if MODEL is not None and SCALER is not None:
-            try:
-                X = np.array([[features.get(f, 0) for f in MODEL_FEATURES]])
-                X_scaled = SCALER.transform(X)
-                probs = MODEL.predict_proba(X_scaled)[0]
-                
-                neutral_prob = float(probs[0]) if len(probs) > 0 else 0.33
-                buy_prob = float(probs[1]) if len(probs) > 1 else 0.33
-                sell_prob = float(probs[2]) if len(probs) > 2 else 0.33
-                
-                model_conf = {
-                    "buy": round(buy_prob * 100, 1),
-                    "sell": round(sell_prob * 100, 1),
-                    "neutral": round(neutral_prob * 100, 1)
-                }
-                
-                # Determine ML signal
-                max_prob = max(buy_prob, sell_prob, neutral_prob)
-                if max_prob == buy_prob and buy_prob > 0.4:
-                    ml_signal = "BUY"
-                    ml_probability = buy_prob * 100
-                elif max_prob == sell_prob and sell_prob > 0.4:
-                    ml_signal = "SELL"
-                    ml_probability = sell_prob * 100
-                else:
-                    ml_signal = "NEUTRAL"
-                    ml_probability = neutral_prob * 100
-                
-            except Exception as e:
-                logger.error(f"ML prediction error for {symbol}: {e}")
-        
-        # Combine signals
-        if ml_signal != "NEUTRAL" and signal == ml_signal:
-            signal = ml_signal
-            probability = min(95, int(ml_probability + 10))
-        elif ml_signal != "NEUTRAL" and signal == "NEUTRAL":
-            signal = ml_signal
-            probability = int(ml_probability)
-        elif signal != "NEUTRAL" and ml_signal == "NEUTRAL":
-            probability = 60 + batch_count * 5
-        else:
+        # Skip if volatility is too low
+        if atr_ratio < 0.003:  # 0.3%
             signal = "NEUTRAL"
-            probability = 50
         
-        # Adjust for patterns
-        for pattern in patterns:
-            if ("Bullish" in pattern or "Hammer" in pattern or "Morning" in pattern) and signal == "BUY":
-                probability = min(95, probability + 8)
-            elif ("Bearish" in pattern or "Shooting" in pattern or "Evening" in pattern) and signal == "SELL":
-                probability = min(95, probability + 8)
-        
-        # HTF confirmation
-        if htf_trend == "strong_bullish" and signal == "BUY":
-            probability = min(95, probability + 12)
-        elif htf_trend == "strong_bearish" and signal == "SELL":
-            probability = min(95, probability + 12)
-        elif (htf_trend in ["strong_bullish", "bullish"] and signal == "SELL") or \
-             (htf_trend in ["strong_bearish", "bearish"] and signal == "BUY"):
-            probability = max(30, probability - 15)
-        
-        # Calculate entry, SL, target
-        entry = last_close
+        # Calculate entry, stop loss, target based on method
+        entry = round(ltp, 2)
         stop_loss = target = 0.0
         
         if signal == "BUY":
             if method == "ATR":
-                stop_loss = round(last_close - 1.5 * atr, 2)
-                target = round(last_close + 3.0 * atr, 2)
-            elif method == "SUPERTREND":
-                stop_loss = round(min(st_value, float(df['low'].iloc[-1])), 2)
-                risk = last_close - stop_loss
-                target = round(last_close + 2.5 * risk, 2)
-            else:  # PIVOT
-                stop_loss = round(pivot, 2)
-                target = round(r1 + (r1 - pivot), 2)
-        
+                stop_loss = round(ltp - 1.5 * atr, 2)
+                target = round(ltp + 3.0 * atr, 2)
+            else:  # Default to EMA-based
+                stop_loss = round(min(ltp - 1.5 * atr, ema21), 2)
+                target = round(ltp + (ltp - stop_loss) * 2.5, 2)
+                
         elif signal == "SELL":
             if method == "ATR":
-                stop_loss = round(last_close + 1.5 * atr, 2)
-                target = round(last_close - 3.0 * atr, 2)
-            elif method == "SUPERTREND":
-                stop_loss = round(max(st_value, float(df['high'].iloc[-1])), 2)
-                risk = stop_loss - last_close
-                target = round(last_close - 2.5 * risk, 2)
-            else:  # PIVOT
-                stop_loss = round(pivot, 2)
-                target = round(s1 - (pivot - s1), 2)
+                stop_loss = round(ltp + 1.5 * atr, 2)
+                target = round(ltp - 3.0 * atr, 2)
+            else:  # Default to EMA-based
+                stop_loss = round(max(ltp + 1.5 * atr, ema21), 2)
+                target = round(ltp - (stop_loss - ltp) * 2.5, 2)
         
-        # R:R ratio
+        # Calculate Risk:Reward Ratio
         rr_ratio = 0.0
-        if signal in ["BUY", "SELL"]:
+        if signal in ["BUY", "SELL"] and stop_loss > 0:
             if signal == "BUY":
                 risk = entry - stop_loss
                 reward = target - entry
@@ -800,48 +700,61 @@ def scan_symbol(symbol: str, method: str = "ATR", timeframe: str = "60m"):
             if risk > 0:
                 rr_ratio = round(reward / risk, 2)
         
-        # Trade readiness
-        trade_ready = (
-            signal in ["BUY", "SELL"] and
-            probability >= 75 and
-            rr_ratio >= 2.0 and
-            adx >= 20 and
-            batch_count >= 2 and
-            model_conf is not None and
-            ((htf_trend in ["strong_bullish", "bullish"] and signal == "BUY") or
-             (htf_trend in ["strong_bearish", "bearish"] and signal == "SELL"))
+        # Calculate confidence score
+        confidence_score = calculate_trade_score(
+            htf_bias, htf_score, mtf_structure, mtf_score,
+            ltf_entry, ltf_score, candle_patterns, atr_ratio,
+            rr_ratio, signal, rsi, adx
         )
         
-        reason = " | ".join(batches) if batches else "Weak signals"
-        reason += f" | RSI={round(rsi,1)}, ADX={round(adx,1)}, ML={ml_signal}"
+        # Determine trade readiness
+        trade_ready = (
+            signal in ["BUY", "SELL"] and
+            confidence_score >= 70 and
+            rr_ratio >= 1.5 and
+            atr_ratio >= 0.003 and
+            htf_bias != "NEUTRAL"
+        )
         
-        ltp = get_live_price(symbol) or last_close
+        # Build reason string
+        reasons = []
+        if htf_bias != "NEUTRAL":
+            reasons.append(f"HTF:{htf_bias}")
+        if mtf_structure != "NEUTRAL":
+            reasons.append(f"MTF:{mtf_structure}")
+        if ltf_entry != "NEUTRAL":
+            reasons.append(f"LTF:{ltf_entry}")
+        if candle_patterns:
+            reasons.append(f"PAT:{len(candle_patterns)}")
+        if rr_ratio > 0:
+            reasons.append(f"RR:{rr_ratio}")
+        
+        reason = " | ".join(reasons) if reasons else "No strong signals"
         
         return {
-            "symbol": symbol,
+            "symbol": symbol.replace(".NS", ""),
             "ltp": round(ltp, 2),
             "signal": signal,
-            "rsi": round(rsi, 2),
-            "entry": round(entry, 2),
-            "stop_loss": round(stop_loss, 2),
-            "target": round(target, 2),
+            "entry": entry,
+            "stop_loss": stop_loss,
+            "target": target,
             "rr_ratio": rr_ratio,
-            "probability": probability,
-            "reason": reason,
+            "confidence_score": confidence_score,
             "trade_ready": trade_ready,
+            "rsi": round(rsi, 2),
             "atr": round(atr, 2),
-            "ma100": round(features['ma100'], 2),
             "adx": round(adx, 2),
             "vwap": round(vwap, 2),
-            "batches_count": batch_count,
-            "method": method,
-            "supertrend": round(st_value, 2),
-            "timestamp": datetime.now().isoformat(),
-            "model_confidence": model_conf,
-            "patterns": patterns,
-            "htf_trend": htf_trend,
-            "volume_ratio": round(features['vol_ratio'], 2),
-            "trend_strength": round(features['trend_strength'], 4)
+            "ema9": round(ema9, 2),
+            "ema21": round(ema21, 2),
+            "ema100": round(ema100, 2),
+            "macd_hist": round(macd_hist, 4),
+            "htf_bias": htf_bias,
+            "mtf_structure": mtf_structure,
+            "ltf_entry": ltf_entry,
+            "candle_pattern": candle_patterns,
+            "reason": reason,
+            "timestamp": datetime.now().isoformat()
         }
         
     except Exception as e:
@@ -849,14 +762,14 @@ def scan_symbol(symbol: str, method: str = "ATR", timeframe: str = "60m"):
         return None
 
 def scan_symbol_wrapper(args):
-    symbol, method, timeframe = args
-    return scan_symbol(symbol, method, timeframe)
+    symbol, method = args
+    return scan_symbol(symbol, method)
 
-def scan_multiple_symbols(symbols, method="ATR", timeframe="60m"):
+def scan_multiple_symbols(symbols, method="ATR"):
     results = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_symbol = {
-            executor.submit(scan_symbol_wrapper, (sym, method, timeframe)): sym 
+            executor.submit(scan_symbol_wrapper, (sym, method)): sym 
             for sym in symbols
         }
         for future in as_completed(future_to_symbol):
@@ -873,31 +786,30 @@ def scan_multiple_symbols(symbols, method="ATR", timeframe="60m"):
 # -------------------------------------------------
 @app.route("/scan", methods=["POST"])
 def scan():
-    global CURRENT_METHOD, CURRENT_TIMEFRAME
+    global CURRENT_METHOD, SCAN_CACHE
     try:
         data = request.get_json() or {}
         method = data.get("method", "ATR").upper()
-        timeframe = data.get("timeframe", "60m")
         raw_symbols = data.get("symbols", [])
         
         symbols_to_scan = NIFTY_50
         if isinstance(raw_symbols, list) and len(raw_symbols) > 0:
-            symbols_to_scan = [s.strip().upper() for s in raw_symbols if s.strip()]
+            symbols_to_scan = [s.strip().upper() + ".NS" if not s.strip().upper().endswith(".NS") else s.strip().upper() for s in raw_symbols if s.strip()]
         
-        if method not in ["ATR", "SUPERTREND", "PIVOT"]:
+        if method not in ["ATR", "EMA"]:
             method = "ATR"
         
         CURRENT_METHOD = method
-        CURRENT_TIMEFRAME = timeframe
         
-        logger.info(f"Scanning {len(symbols_to_scan)} symbols...")
+        logger.info(f"Scanning {len(symbols_to_scan)} symbols with {method} method...")
         start_time = time.time()
-        results = scan_multiple_symbols(symbols_to_scan, method, timeframe)
+        results = scan_multiple_symbols(symbols_to_scan, method)
         scan_time = round(time.time() - start_time, 2)
         
+        # Sort by trade readiness and confidence score
         results.sort(key=lambda x: (
             not x.get("trade_ready", False),
-            -x.get("probability", 0),
+            -x.get("confidence_score", 0),
             -x.get("rr_ratio", 0)
         ))
         
@@ -907,7 +819,9 @@ def scan():
         return jsonify({
             "results": results,
             "scan_time": scan_time,
-            "cache_stats": cache.get_stats()
+            "cache_stats": cache.get_stats(),
+            "total_scanned": len(symbols_to_scan),
+            "successful_scans": len(results)
         })
     except Exception as e:
         logger.error(f"Scan error: {e}")
@@ -923,58 +837,21 @@ def stats():
         sell_signals = [s for s in data if s.get("signal") == "SELL"]
         trade_ready = [s for s in data if s.get("trade_ready")]
         
-        avg_prob_buy = sum(s.get("probability", 0) for s in buy_signals) / len(buy_signals) if buy_signals else 0
-        avg_prob_sell = sum(s.get("probability", 0) for s in sell_signals) / len(sell_signals) if sell_signals else 0
+        avg_score_buy = sum(s.get("confidence_score", 0) for s in buy_signals) / len(buy_signals) if buy_signals else 0
+        avg_score_sell = sum(s.get("confidence_score", 0) for s in sell_signals) / len(sell_signals) if sell_signals else 0
         
         return jsonify({
             "total_scanned": len(data),
             "buy_signals": len(buy_signals),
             "sell_signals": len(sell_signals),
             "trade_ready": len(trade_ready),
-            "avg_probability_buy": round(avg_prob_buy, 1),
-            "avg_probability_sell": round(avg_prob_sell, 1),
+            "avg_score_buy": round(avg_score_buy, 1),
+            "avg_score_sell": round(avg_score_sell, 1),
             "last_scan": ts.isoformat() if ts else None,
             "method": CURRENT_METHOD,
-            "timeframe": CURRENT_TIMEFRAME,
-            "model_loaded": MODEL is not None,
-            "cache_stats": cache.get_stats()
+            "cache_stats": cache.get_stats(),
+            "version": "5.1 - Multi-Timeframe Rule-Based"
         })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/train_model", methods=["POST"])
-def train_model_endpoint():
-    try:
-        if not SKLEARN_AVAILABLE:
-            return jsonify({"success": False, "msg": "scikit-learn not available"}), 400
-        
-        payload = request.get_json() or {}
-        force = payload.get("force", False)
-        
-        success, msg = train_enhanced_model(force=force)
-        
-        global MODEL, SCALER
-        if success:
-            MODEL, SCALER = load_model()
-        
-        return jsonify({"success": success, "msg": msg})
-    except Exception as e:
-        return jsonify({"success": False, "msg": str(e)}), 500
-
-@app.route("/model_status", methods=["GET"])
-def model_status():
-    try:
-        loaded = MODEL is not None
-        info = {}
-        if loaded and os.path.exists(MODEL_PATH):
-            try:
-                data = joblib.load(MODEL_PATH)
-                info['accuracy'] = f"{data.get('accuracy', 0):.2%}"
-                info['report'] = data.get('report', {})
-                info['features_count'] = len(data.get('features', []))
-            except Exception:
-                pass
-        return jsonify({"model_loaded": loaded, "info": info})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -983,7 +860,7 @@ def home():
     return render_template_string(HTML_TEMPLATE)
 
 # -------------------------------------------------
-# Enhanced HTML Template with Modern UI
+# HTML Template (Same as before - included for completeness)
 # -------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -991,7 +868,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🚀 Advanced Stock Scanner V4.5</title>
+    <title>🚀 Advanced Stock Scanner V5.1 - Multi-Timeframe</title>
     <style>
         * {
             margin: 0;
@@ -1008,7 +885,7 @@ HTML_TEMPLATE = """
         }
         
         .container {
-            max-width: 1600px;
+            max-width: 1800px;
             margin: 0 auto;
         }
         
@@ -1028,12 +905,47 @@ HTML_TEMPLATE = """
             background: linear-gradient(135deg, #00d4aa 0%, #00a8ff 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
         
         .subtitle {
             color: #9fa8da;
             font-size: 14px;
+            margin-bottom: 5px;
+        }
+        
+        .version-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            background: linear-gradient(135deg, #00d4aa 0%, #00a8ff 100%);
+            color: #0a0e27;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 5px;
+        }
+        
+        .timeframe-info {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .tf-badge {
+            padding: 6px 15px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            font-size: 12px;
+            color: #9fa8da;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .tf-badge .label {
+            color: #00d4aa;
+            font-weight: 600;
         }
         
         .controls {
@@ -1075,10 +987,11 @@ HTML_TEMPLATE = """
             font-size: 14px;
             outline: none;
             transition: all 0.3s;
+            min-width: 200px;
         }
         
         select:focus, input:focus {
-            background: rgba(255, 255, 255, 0.12);
+            background: grey;
             border-color: #00d4aa;
             box-shadow: 0 0 0 3px rgba(0, 212, 170, 0.1);
         }
@@ -1118,7 +1031,7 @@ HTML_TEMPLATE = """
         
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 15px;
             margin-bottom: 25px;
         }
@@ -1213,6 +1126,7 @@ HTML_TEMPLATE = """
         table {
             width: 100%;
             border-collapse: collapse;
+            min-width: 1200px;
         }
         
         thead tr {
@@ -1227,12 +1141,14 @@ HTML_TEMPLATE = """
             text-transform: uppercase;
             letter-spacing: 0.5px;
             font-weight: 600;
+            white-space: nowrap;
         }
         
         td {
             padding: 15px 12px;
             border-bottom: 1px solid rgba(255, 255, 255, 0.05);
             font-size: 13px;
+            white-space: nowrap;
         }
         
         tbody tr {
@@ -1290,9 +1206,39 @@ HTML_TEMPLATE = """
             border: 1px solid rgba(244, 67, 54, 0.3);
         }
         
-        .ml-conf {
-            font-size: 11px;
+        .tf-badge-small {
+            padding: 2px 8px;
+            border-radius: 8px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        
+        .tf-bullish {
+            background: rgba(76, 175, 80, 0.15);
+            color: #4caf50;
+            border: 1px solid rgba(76, 175, 80, 0.3);
+        }
+        
+        .tf-bearish {
+            background: rgba(244, 67, 54, 0.15);
+            color: #f44336;
+            border: 1px solid rgba(244, 67, 54, 0.3);
+        }
+        
+        .tf-neutral {
+            background: rgba(159, 168, 218, 0.15);
             color: #9fa8da;
+            border: 1px solid rgba(159, 168, 218, 0.3);
+        }
+        
+        .pattern-badge {
+            padding: 2px 8px;
+            background: rgba(0, 212, 170, 0.15);
+            color: #00d4aa;
+            border-radius: 8px;
+            font-size: 10px;
+            margin: 1px;
+            display: inline-block;
         }
         
         .status {
@@ -1303,6 +1249,7 @@ HTML_TEMPLATE = """
             border-radius: 8px;
             font-size: 14px;
             color: #00d4aa;
+            display: none;
         }
         
         .loading {
@@ -1313,6 +1260,8 @@ HTML_TEMPLATE = """
             border-top-color: #00d4aa;
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 8px;
         }
         
         @keyframes spin {
@@ -1328,50 +1277,55 @@ HTML_TEMPLATE = """
             .stats-grid {
                 grid-template-columns: 1fr;
             }
+            
+            select, input {
+                min-width: 100%;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Advanced Stock Scanner V4.5</h1>
-            <p class="subtitle">ML-Powered Technical Analysis | Real-time Market Intelligence</p>
+            <h1>🚀 Advanced Stock Scanner V5.1</h1>
+            <p class="subtitle">Multi-Timeframe Rule-Based Analysis | No ML | Professional Risk Management</p>
+            <span class="version-badge">Fixed yfinance v5.1</span>
+            
+            <div class="timeframe-info">
+                <div class="tf-badge">
+                    <span class="label">HTF (1H):</span> Trend Permission
+                </div>
+                <div class="tf-badge">
+                    <span class="label">MTF (15M):</span> Structure Confirmation
+                </div>
+                <div class="tf-badge">
+                    <span class="label">LTF (5M):</span> Entry Timing
+                </div>
+            </div>
         </div>
         
         <div class="controls">
             <div class="control-row">
                 <div class="control-group">
-                    <label>Method</label>
+                    <label>Risk Method</label>
                     <select id="method">
-                        <option value="ATR">ATR</option>
-                        <option value="SUPERTREND">SuperTrend</option>
-                        <option value="PIVOT">Pivot Points</option>
-                    </select>
-                </div>
-                
-                <div class="control-group">
-                    <label>Timeframe</label>
-                    <select id="timeframe">
-                        <option value="60m">1 Hour</option>
-                        <option value="15m">15 Minutes</option>
+                        <option value="ATR">ATR-Based (Recommended)</option>
+                        <option value="EMA">EMA-Based</option>
                     </select>
                 </div>
                 
                 <div class="control-group" style="flex: 1;">
-                    <label>Custom Symbols (Optional)</label>
-                    <input type="text" id="customSymbols" placeholder="e.g., RELIANCE, TCS, INFY">
+                    <label>Custom Symbols (Optional, comma separated)</label>
+                    <input type="text" id="customSymbols" placeholder="e.g., RELIANCE.NS, TCS.NS, INFY.NS (Leave empty for NIFTY 50)">
                 </div>
             </div>
             
             <div class="control-row">
                 <button class="btn btn-primary" onclick="startScan()">
-                    <span id="scanBtn">🔍 Start Scan</span>
-                </button>
-                <button class="btn btn-secondary" onclick="trainModel()">
-                    🧠 Train ML Model
+                    <span id="scanBtn">🔍 Start Multi-Timeframe Scan</span>
                 </button>
                 <button class="btn btn-secondary" onclick="loadStats()">
-                    📊 Refresh Stats
+                    📊 Refresh Statistics
                 </button>
             </div>
         </div>
@@ -1382,32 +1336,32 @@ HTML_TEMPLATE = """
                 <span class="stat-value" id="total">0</span>
             </div>
             <div class="stat-card">
-                <span class="stat-label">Buy Signals</span>
+                <span class="stat-label">Buy Signals (HTF Bullish)</span>
                 <span class="stat-value buy" id="buy">0</span>
             </div>
             <div class="stat-card">
-                <span class="stat-label">Sell Signals</span>
+                <span class="stat-label">Sell Signals (HTF Bearish)</span>
                 <span class="stat-value sell" id="sell">0</span>
             </div>
             <div class="stat-card">
-                <span class="stat-label">Trade Ready</span>
+                <span class="stat-label">Trade Ready (Score ≥ 70)</span>
                 <span class="stat-value ready" id="ready">0</span>
             </div>
         </div>
         
         <div class="filters">
             <div class="filter-row">
-                <span style="color: #9fa8da; font-size: 13px; font-weight: 600;">FILTER:</span>
-                <button class="filter-btn active" data-filter="all" onclick="filterResults('all')">All</button>
-                <button class="filter-btn" data-filter="buy" onclick="filterResults('buy')">Buy Only</button>
-                <button class="filter-btn" data-filter="sell" onclick="filterResults('sell')">Sell Only</button>
-                <button class="filter-btn" data-filter="ready" onclick="filterResults('ready')">Trade Ready</button>
-                <button class="filter-btn" data-filter="high-prob" onclick="filterResults('high-prob')">High Probability (≥80%)</button>
+                <span style="color: #9fa8da; font-size: 13px; font-weight: 600;">FILTER SIGNALS:</span>
+                <button class="filter-btn active" data-filter="all" onclick="filterResults('all')">All Signals</button>
+                <button class="filter-btn" data-filter="buy" onclick="filterResults('buy')">Buy Only (HTF Bullish)</button>
+                <button class="filter-btn" data-filter="sell" onclick="filterResults('sell')">Sell Only (HTF Bearish)</button>
+                <button class="filter-btn" data-filter="ready" onclick="filterResults('ready')">Trade Ready Only</button>
+                <button class="filter-btn" data-filter="high-score" onclick="filterResults('high-score')">High Score (≥80)</button>
             </div>
         </div>
         
-        <div id="status" class="status" style="display: none;">
-            <span class="loading"></span> Scanning markets...
+        <div id="status" class="status">
+            <span class="loading"></span> Scanning across multiple timeframes (HTF 1H, MTF 15M, LTF 5M)...
         </div>
         
         <div class="table-container">
@@ -1417,21 +1371,21 @@ HTML_TEMPLATE = """
                         <th>Symbol</th>
                         <th>LTP</th>
                         <th>Signal</th>
-                        <th>Probability</th>
+                        <th>Confidence</th>
                         <th>Entry</th>
                         <th>Stop Loss</th>
                         <th>Target</th>
                         <th>R:R</th>
-                        <th>ML Confidence</th>
-                        <th>Patterns</th>
-                        <th>HTF Trend</th>
-                        <th>Reason</th>
+                        <th>Timeframe Analysis</th>
+                        <th>Candle Patterns</th>
+                        <th>Indicators</th>
+                        <th>Trade Ready</th>
                     </tr>
                 </thead>
                 <tbody id="tbody">
                     <tr>
                         <td colspan="12" style="text-align: center; padding: 40px; color: #9fa8da;">
-                            Click "Start Scan" to begin analysis
+                            Click "Start Multi-Timeframe Scan" to begin analysis
                         </td>
                     </tr>
                 </tbody>
@@ -1445,9 +1399,8 @@ HTML_TEMPLATE = """
         
         async function startScan() {
             const method = document.getElementById('method').value;
-            const timeframe = document.getElementById('timeframe').value;
             const raw = document.getElementById('customSymbols').value.trim();
-            const symbols = raw ? raw.split(/[\\s,]+/).map(s => s.trim().toUpperCase()).filter(Boolean) : null;
+            const symbols = raw ? raw.split(/[\\s,]+/).map(s => s.trim()).filter(Boolean) : null;
             
             const scanBtn = document.getElementById('scanBtn');
             scanBtn.innerHTML = '<span class="loading"></span> Scanning...';
@@ -1457,30 +1410,25 @@ HTML_TEMPLATE = """
                 const resp = await fetch('/scan', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({method, timeframe, symbols})
+                    body: JSON.stringify({method, symbols})
                 });
                 
                 const data = await resp.json();
                 allResults = data.results || [];
                 
-                scanBtn.textContent = '🔍 Start Scan';
+                scanBtn.textContent = '🔍 Start Multi-Timeframe Scan';
                 document.getElementById('status').style.display = 'none';
                 
                 updateStats(allResults);
                 renderResults(allResults);
                 
             } catch (error) {
-                scanBtn.textContent = '🔍 Start Scan';
+                scanBtn.textContent = '🔍 Start Multi-Timeframe Scan';
                 document.getElementById('status').style.display = 'none';
-                alert('Scan failed: ' + error.message);                alert('Scan failed: ' + error.message);
+                alert('Scan failed: ' + error.message);
             }
-
-        }  // ← closes startScan()
-
-
-        // -----------------------------
-        // Update Summary Statistics
-        // -----------------------------
+        }
+        
         function updateStats(results) {
             const buy = results.filter(r => r.signal === "BUY").length;
             const sell = results.filter(r => r.signal === "SELL").length;
@@ -1491,11 +1439,7 @@ HTML_TEMPLATE = """
             document.getElementById('sell').textContent = sell;
             document.getElementById('ready').textContent = ready;
         }
-
-
-        // -----------------------------
-        // Render Table Results
-        // -----------------------------
+        
         function renderResults(results) {
             const tbody = document.getElementById('tbody');
             tbody.innerHTML = "";
@@ -1504,7 +1448,7 @@ HTML_TEMPLATE = """
                 tbody.innerHTML = `
                     <tr>
                         <td colspan="12" style="text-align: center; padding: 40px; color: #9fa8da;">
-                            No results found
+                            No results found. Try changing your criteria.
                         </td>
                     </tr>`;
                 return;
@@ -1514,44 +1458,65 @@ HTML_TEMPLATE = """
                 const signalClass = r.signal === "BUY" ? "signal-buy"
                                   : r.signal === "SELL" ? "signal-sell"
                                   : "signal-neutral";
-
-                const modelConf = r.model_confidence
-                    ? `B:${r.model_confidence.buy}% | S:${r.model_confidence.sell}%`
-                    : "N/A";
-
-                const patterns = r.patterns && r.patterns.length
-                    ? r.patterns.join(", ")
+                
+                const scoreBadgeClass = r.confidence_score >= 80 ? 'badge-high'
+                                      : r.confidence_score >= 70 ? 'badge-medium'
+                                      : 'badge-low';
+                
+                const htfClass = r.htf_bias === "BULLISH" ? "tf-bullish"
+                               : r.htf_bias === "BEARISH" ? "tf-bearish"
+                               : "tf-neutral";
+                               
+                const mtfClass = r.mtf_structure === "BULLISH" ? "tf-bullish"
+                               : r.mtf_structure === "BEARISH" ? "tf-bearish"
+                               : "tf-neutral";
+                               
+                const ltfClass = r.ltf_entry.includes("BULLISH") ? "tf-bullish"
+                               : r.ltf_entry.includes("BEARISH") ? "tf-bearish"
+                               : "tf-neutral";
+                
+                const patterns = r.candle_pattern && r.candle_pattern.length
+                    ? r.candle_pattern.map(p => `<span class="pattern-badge">${p.replace('_', ' ')}</span>`).join(' ')
                     : "-";
-
+                
+                const indicators = `
+                    RSI: ${r.rsi} | 
+                    ADX: ${r.adx} | 
+                    ATR: ${r.atr} |
+                    MACD: ${r.macd_hist > 0 ? '+' : ''}${r.macd_hist}
+                `;
+                
                 tbody.innerHTML += `
                     <tr>
-                        <td>${r.symbol}</td>
-                        <td>${r.ltp}</td>
+                        <td><strong>${r.symbol}</strong></td>
+                        <td>${r.ltp.toFixed(2)}</td>
                         <td class="${signalClass}">${r.signal}</td>
                         <td>
-                            <span class="badge ${
-                                r.probability >= 80 ? 'badge-high'
-                                : r.probability >= 60 ? 'badge-medium'
-                                : 'badge-low'
-                            }">${r.probability}%</span>
+                            <span class="badge ${scoreBadgeClass}">${r.confidence_score}%</span>
                         </td>
-                        <td>${r.entry}</td>
-                        <td>${r.stop_loss}</td>
-                        <td>${r.target}</td>
+                        <td>${r.entry.toFixed(2)}</td>
+                        <td>${r.stop_loss.toFixed(2)}</td>
+                        <td>${r.target.toFixed(2)}</td>
                         <td>${r.rr_ratio}</td>
-                        <td class="ml-conf">${modelConf}</td>
+                        <td>
+                            <div style="display: flex; gap: 5px; flex-wrap: wrap;">
+                                <span class="tf-badge-small ${htfClass}" title="High Timeframe (1H)">HTF: ${r.htf_bias}</span>
+                                <span class="tf-badge-small ${mtfClass}" title="Medium Timeframe (15M)">MTF: ${r.mtf_structure}</span>
+                                <span class="tf-badge-small ${ltfClass}" title="Low Timeframe (5M)">LTF: ${r.ltf_entry}</span>
+                            </div>
+                        </td>
                         <td>${patterns}</td>
-                        <td>${r.htf_trend}</td>
-                        <td>${r.reason}</td>
+                        <td style="font-size: 11px; color: #9fa8da;">${indicators}</td>
+                        <td>
+                            ${r.trade_ready 
+                                ? '<span class="badge badge-ready">READY</span>' 
+                                : '<span style="color: #9fa8da; font-size: 11px;">Not Ready</span>'}
+                        </td>
                     </tr>
                 `;
             });
         }
-
-
-        // -----------------------------
-        // Filtering Logic
-        // -----------------------------
+        
         function filterResults(type) {
             currentFilter = type;
 
@@ -1572,40 +1537,14 @@ HTML_TEMPLATE = """
             else if (type === "ready") {
                 filtered = filtered.filter(r => r.trade_ready);
             }
-            else if (type === "high-prob") {
-                filtered = filtered.filter(r => r.probability >= 80);
+            else if (type === "high-score") {
+                filtered = filtered.filter(r => r.confidence_score >= 80);
             }
 
             renderResults(filtered);
             updateStats(filtered);
         }
-
-
-        // -----------------------------
-        // Train ML Model
-        // -----------------------------
-        async function trainModel() {
-            if (!confirm("⚠️ Training takes time. Continue?")) return;
-
-            try {
-                const resp = await fetch("/train_model", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/json"},
-                    body: JSON.stringify({force: true})
-                });
-
-                const data = await resp.json();
-
-                alert(data.msg || "Done!");
-            } catch (err) {
-                alert("Model training failed: " + err.message);
-            }
-        }
-
-
-        // -----------------------------
-        // Refresh Stats (global stats API)
-        // -----------------------------
+        
         async function loadStats() {
             try {
                 const resp = await fetch("/stats");
@@ -1615,11 +1554,26 @@ HTML_TEMPLATE = """
                 document.getElementById("buy").textContent = data.buy_signals;
                 document.getElementById("sell").textContent = data.sell_signals;
                 document.getElementById("ready").textContent = data.trade_ready;
+                
+                // Show notification
+                document.getElementById('status').style.display = 'block';
+                document.getElementById('status').innerHTML = `
+                    <span class="loading"></span> 
+                    Stats updated: ${data.buy_signals} BUY, ${data.sell_signals} SELL, ${data.trade_ready} Trade Ready
+                `;
+                
+                setTimeout(() => {
+                    document.getElementById('status').style.display = 'none';
+                }, 3000);
+                
             } catch (err) {
                 alert("Failed to load stats: " + err.message);
             }
         }
-
+        
+        // Load initial stats
+        window.onload = loadStats;
+        
     </script>
 </body>
 </html>
@@ -1630,13 +1584,13 @@ HTML_TEMPLATE = """
 # -------------------------------------------------
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("🚀 Starting Enhanced Stock Scanner")
+    logger.info("🚀 Starting Multi-Timeframe Stock Scanner V5.1")
     logger.info("=" * 60)
-    logger.info(f"Cache Backend: {'Redis' if REDIS_AVAILABLE else 'Memory'}")
+    logger.info(f"Timeframes: HTF={HTF_INTERVAL}, MTF={MTF_INTERVAL}, LTF={LTF_INTERVAL}")
+    logger.info(f"Periods adjusted for yfinance limitations")
+    logger.info(f"Rules: HTF trend permission required")
+    logger.info(f"Scoring: Confidence-based (70+ = Trade Ready)")
     logger.info(f"Parallel Workers: {MAX_WORKERS}")
-    logger.info(f"Cache Expiry: {CACHE_EXPIRY}s")
     logger.info("=" * 60)
     
-
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="127.0.0.1", port=5000, debug=False, threaded=True)
